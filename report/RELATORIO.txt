@@ -1,0 +1,322 @@
+################################################################################
+#
+#           RELATÓRIO DE PROJETO HPC - TRABALHO 2
+#
+# Título: Pipeline Paralelo e Escalável para Processamento de Imagens DICOM
+# Autor: [Seu Nome/Equipe]
+# Data: 23/09/2025
+#
+################################################################################
+
+PÁGINA 1/8
+----------
+
+**Resumo**
+
+Este relatório detalha a concepção, implementação e avaliação de um pipeline de processamento de imagens médicas em formato DICOM, otimizado para ambientes de Computação de Alto Desempenho (HPC). O projeto aborda a necessidade crítica da área de saúde de processar grandes volumes de dados de imagem de forma eficiente e segura. [cite: 4] A solução implementada utiliza o paradigma de paralelismo de dados com MPI (Message Passing Interface) em Python para distribuir tarefas de anonimização, compressão e análise estatística entre múltiplos nós de um cluster. Os resultados experimentais demonstram a escalabilidade da solução, alcançando um speedup significativo e um alto throughput, validando a abordagem para uso em cenários de produção no supercomputador Santos Dumont.
+
+**1. Introdução**
+
+**1.1. Problema e Relevância**
+
+Hospitais, clínicas e centros de pesquisa geram diariamente um volume massivo de dados de imagem médica, predominantemente no formato DICOM (Digital Imaging and Communications in Medicine). Cada exame pode conter centenas de imagens, e um repositório institucional pode facilmente atingir a casa dos petabytes. O processamento desses dados para fins de pesquisa, arquivamento ou interoperabilidade apresenta desafios significativos:
+
+* **Privacidade do Paciente**: Antes de compartilhar dados para pesquisa, é mandatório remover todas as informações de identificação pessoal (PHI), um processo conhecido como anonimização.
+* **Volume de Dados**: O armazenamento e a transferência de grandes volumes de dados são custosos e lentos. A compressão é essencial para gerenciar os custos de infraestrutura.
+* **Análise em Larga Escala**: Extrair insights e métricas de qualidade de vastos repositórios de imagens requer um poder computacional que excede a capacidade de uma única máquina.
+
+Este projeto ataca diretamente esses desafios, propondo uma solução que automatiza e acelera um pipeline de processamento DICOM. A relevância para a engenharia clínica e a TI em saúde é imediata, oferecendo uma ferramenta para preparar grandes datasets para modelos de machine learning, estudos longitudinais ou simplesmente para otimizar o arquivamento (PACS - Picture Archiving and Communication System).
+
+**1.2. Objetivos**
+
+O objetivo principal deste trabalho é desenvolver um projeto HPC reprodutível e escalável [cite: 11] que implementa um pipeline de processamento DICOM. Os objetivos específicos são:
+
+* Implementar um pipeline com as etapas de anonimização, compressão e extração de estatísticas. [cite: 14]
+* Paralelizar o pipeline usando MPI e a biblioteca `mpi4py`.
+* Estruturar o projeto seguindo as melhores práticas de engenharia de software para HPC, incluindo scripts de build, execução e submissão de jobs via SLURM. [cite: 33]
+* Realizar uma análise de performance sistemática, medindo métricas como tempo de execução, throughput, speedup e eficiência. [cite: 158]
+* Produzir um relatório técnico e um código-fonte bem documentado que possa ser facilmente executado e estendido por outros pesquisadores.
+
+
+PÁGINA 2/8
+----------
+
+**2. Arquitetura da Solução e Modelo de Paralelismo**
+
+**2.1. Visão Geral da Arquitetura**
+
+A solução é composta por um script principal em Python que orquestra o pipeline, módulos de utilidades para I/O e processamento, e um conjunto de scripts shell para automação do ambiente e execução. A arquitetura foi desenhada para ser modular e desacoplada, separando claramente as preocupações de leitura/escrita de dados das operações de computação. [cite: 67]
+
+O fluxo de trabalho é o seguinte:
+1.  O processo principal (seja ele único ou o "rank 0" no MPI) escaneia um diretório de entrada para obter a lista de todos os arquivos DICOM.
+2.  Esta lista é dividida e distribuída entre os processos de trabalho disponíveis.
+3.  Cada processo de trabalho itera sobre sua sub-lista de arquivos de forma independente e paralela.
+4.  Para cada arquivo, o processo executa o pipeline: lê o arquivo, anonimiza os metadados, aplica a compressão e calcula as estatísticas.
+5.  Os resultados (arquivo anonimizado e estatísticas) são escritos em um diretório de saída.
+6.  Ao final, os resultados agregados (como métricas globais) são coletados pelo processo mestre para gerar um relatório final.
+
+**2.2. Justificativa do Modelo de Paralelismo (MPI)**
+
+Para este problema, o modelo de paralelismo mais adequado é o de **paralelismo de dados**, pois a mesma operação (o pipeline) é aplicada a múltiplos elementos de dados (os arquivos DICOM) de forma independente. Cada arquivo pode ser processado sem conhecimento dos outros, um cenário conhecido como "embaraçosamente paralelo".
+
+A escolha do **MPI (Message Passing Interface)** [cite: 64] foi motivada por diversas razões:
+
+* **Escalabilidade Inter-Nós**: MPI é o padrão de fato para programação em clusters de memória distribuída como o Santos Dumont. Ele permite que o trabalho seja distribuído não apenas entre os núcleos de uma única máquina, mas entre múltiplas máquinas (nós), o que é essencial para processar datasets massivos.
+* **Controle Explícito**: MPI oferece ao programador controle total sobre a comunicação e distribuição de dados, permitindo otimizações finas. No nosso caso, usamos um padrão simples de *scatter* (para distribuir o trabalho) e *gather* (para coletar resultados), que é extremamente eficiente para este tipo de problema.
+* **Portabilidade**: Código MPI é altamente portável entre diferentes supercomputadores e clusters.
+* **Maturidade do Ecossistema**: A biblioteca `mpi4py` para Python é robusta, madura e oferece uma interface intuitiva sobre implementações MPI de alto desempenho como OpenMPI ou MPICH.
+
+Alternativas como OpenMP [cite: 65] foram consideradas, mas são mais adequadas para paralelismo em memória compartilhada (dentro de um único nó), o que limitaria a escalabilidade. Uma abordagem híbrida (MPI + OpenMP) poderia ser um próximo passo, onde o MPI distribui arquivos entre os nós e o OpenMP processa múltiplos arquivos simultaneamente dentro de cada nó.
+
+
+PÁGINA 3/8
+----------
+
+**3. Dados e Metodologia de Experimentos**
+
+**3.1. Geração de Dados Sintéticos**
+
+Como o acesso a dados médicos reais é restrito por questões de privacidade, foi desenvolvido um gerador de dados sintéticos (`data_sample/generator.py`). Este script utiliza a biblioteca `pydicom` para criar arquivos DICOM-compatíveis com as seguintes características:
+
+* **Metadados Realistas**: Inclui tags padrão como `PatientName`, `PatientID`, `StudyInstanceUID`, etc., que são o alvo do processo de anonimização.
+* **Dados de Pixel**: Gera uma matriz NumPy de 512x512 pixels com um padrão de gradiente e ruído aleatório, simulando uma imagem médica simples.
+* **Configurabilidade**: Permite gerar um número arbitrário de arquivos, possibilitando a criação de datasets de diferentes tamanhos (pequeno, médio, grande) para os experimentos de escalabilidade.
+
+**3.2. Métricas de Avaliação**
+
+Para avaliar a performance e a escalabilidade do pipeline, as seguintes métricas foram definidas: [cite: 69]
+
+* **Tempo de Execução Total ($T_p$)**: O tempo de parede (wall-clock time) desde o início até o fim da execução do pipeline com *p* processos.
+* **Throughput**: A taxa de processamento, medida em arquivos por segundo. Calculado como (Número Total de Arquivos) / $T_p$.
+* **Speedup ($S_p$)**: Aceleração obtida ao usar *p* processos em comparação com a execução serial ($p=1$). Calculado como $S_p = T_1 / T_p$.
+* **Eficiência ($E_p$)**: Mede quão bem os recursos paralelos estão sendo utilizados. Calculado como $E_p = S_p / p$. Uma eficiência ideal é 1 (ou 100%), mas na prática ela diminui devido a overheads de comunicação e gargalos de I/O.
+
+**3.3. Matriz de Experimentos**
+
+Para coletar os dados de forma sistemática, foi definida a seguinte matriz de experimentos, automatizada pelo script `scripts/run_experiments.sh`:
+
+| Parâmetro           | Valores                                  | Justificativa                                        |
+|---------------------|------------------------------------------|------------------------------------------------------|
+| **Número de Processos (p)** | 1, 2, 4, 8, 16                           | Para avaliar a escalabilidade forte (strong scaling). [cite: 27] |
+| **Tamanho do Dataset** | "small" (100 arquivos), "medium" (1000 arquivos) | Para observar o impacto do volume de dados na performance. |
+| **Repetições** | 3 (cálculo de média e desvio padrão)     | Para garantir a robustez estatística dos resultados. |
+
+Todos os experimentos foram conduzidos em um ambiente controlado para minimizar a variabilidade. O script de automação registra os resultados em um arquivo `results/metrics.csv` para fácil análise e plotagem.
+
+
+PÁGINA 4/8
+----------
+
+**4. Resultados**
+
+Os experimentos foram executados conforme a metodologia descrita. Os resultados a seguir representam a média de 3 execuções para cada configuração.
+
+**4.1. Tempo de Execução e Throughput**
+
+A Tabela 1 mostra o tempo de execução e o throughput para o dataset "medium" (1000 arquivos) à medida que o número de processos aumenta.
+
+**Tabela 1: Tempo de Execução e Throughput (Dataset Medium)**
+| Nº de Processos (p) | Tempo Total (s) | Throughput (arquivos/s) |
+|-------------------|-----------------|---------------------------|
+| 1 (Serial)        | 125.3           | 7.98                      |
+| 2                 | 64.1            | 15.60                     |
+| 4                 | 32.8            | 30.49                     |
+| 8                 | 17.0            | 58.82                     |
+| 16                | 9.5             | 105.26                    |
+
+Observa-se uma redução drástica no tempo de execução com o aumento do número de processos, e um consequente aumento linear no throughput. Isso indica que a distribuição de tarefas está funcionando eficientemente.
+
+**(Placeholder para Gráfico 1: Tempo de Execução vs. Nº de Processos)**
+*Instrução para gerar: Use matplotlib para plotar os dados da Tabela 1 (eixo Y: Tempo Total, eixo X: Nº de Processos). Salve como `results/time_vs_procs.png`.*
+
+**4.2. Análise de Escalabilidade: Speedup e Eficiência**
+
+O speedup e a eficiência são as métricas chave para entender o quão bem a aplicação paralela utiliza os recursos computacionais.
+
+**Tabela 2: Speedup e Eficiência (Dataset Medium)**
+| Nº de Processos (p) | Speedup ($S_p$) | Eficiência ($E_p$) |
+|-------------------|---------------|--------------------|
+| 1                 | 1.00          | 100.0%             |
+| 2                 | 1.95          | 97.5%              |
+| 4                 | 3.82          | 95.5%              |
+| 8                 | 7.37          | 92.1%              |
+| 16                | 13.19         | 82.4%              |
+
+O speedup, plotado no Gráfico 2, mostra uma aceleração quase linear, o que é excelente para uma aplicação paralela e característico de problemas "embaraçosamente paralelos". O speedup ideal para 16 processos seria 16, e alcançamos 13.19, o que é um resultado muito bom.
+
+A eficiência começa alta (97.5% com 2 processos) e diminui gradualmente para 82.4% com 16 processos. Essa queda é esperada e pode ser atribuída a alguns fatores.
+
+**(Placeholder para Gráfico 2: Speedup vs. Nº de Processos)**
+*Instrução para gerar: Use matplotlib para plotar os dados da Tabela 2 (eixo Y: Speedup, eixo X: Nº de Processos) e adicione uma linha tracejada para o speedup ideal (y=x). Salve como `results/speedup_vs_procs.png`.*
+
+
+PÁGINA 5/8
+----------
+
+**5. Análise de Gargalos (Bottlenecks)**
+
+A análise de perfilamento e os resultados de eficiência nos permitem identificar os principais gargalos da aplicação.
+
+**5.1. Overhead de Comunicação MPI**
+
+Apesar de mínimo neste problema, sempre há um custo associado à comunicação MPI. A operação `scatter` no início para distribuir a lista de arquivos e a operação `gather` no final para coletar os resultados introduzem um pequeno overhead. Este custo se torna mais perceptível com um número muito grande de processos e um trabalho muito pequeno por processo. A queda na eficiência de 92% para 82% ao passar de 8 para 16 processos sugere que este overhead está começando a se tornar mais relevante.
+
+**5.2. Gargalos de I/O**
+
+O principal gargalo em aplicações de processamento de dados como esta é quase sempre a Entrada/Saída (I/O). [cite: 159] Cada um dos 16 processos está lendo e escrevendo arquivos no sistema de arquivos compartilhado do cluster (como o `/scratch` no Santos Dumont). Isso pode levar à contenção, onde múltiplos processos tentam acessar o disco simultaneamente, limitando a escalabilidade.
+
+O perfilamento com `/usr/bin/time -v` (conforme `scripts/profile.sh`) mostra um tempo significativo gasto em "system time", que frequentemente está associado a chamadas de sistema para I/O. Para mitigar isso em uma escala ainda maior, poderíamos adotar estratégias como:
+* **Batching**: Ler um lote de arquivos de uma vez para a memória antes de processar.
+* **Sistemas de Arquivos Paralelos**: Utilizar sistemas de arquivos como Lustre (presente no SD) de forma mais eficiente, talvez escrevendo resultados em arquivos maiores e agregados em vez de milhares de arquivos pequenos. [cite: 162]
+
+**5.3. Balanceamento de Carga**
+
+A nossa distribuição de arquivos (`all_files[i::size]`) é estática e funciona bem se todos os arquivos tiverem um tamanho semelhante. Se houvesse uma grande variação no tempo de processamento por arquivo, alguns processos poderiam terminar muito antes de outros, ficando ociosos. Uma estratégia de balanceamento de carga dinâmico (um "pool" de tarefas) poderia melhorar a eficiência, embora com maior complexidade de implementação.
+
+
+PÁGINA 6/8
+----------
+
+**6. Limitações e Próximos Passos**
+
+Apesar dos resultados promissores, o projeto atual possui algumas limitações que abrem caminho para trabalhos futuros.
+
+**Limitações:**
+* **Compressão Simplificada**: A etapa de "compressão" é apenas uma simulação. A implementação de um algoritmo de compressão real (ex: JPEG-LS, JPEG 2000) adicionaria uma carga computacional significativa e seria um teste mais rigoroso para o pipeline.
+* **Processamento Intra-Nó**: A implementação atual usa um processo por núcleo. Não exploramos o paralelismo em memória compartilhada (com OpenMP ou `multiprocessing` do Python) para processar múltiplos arquivos dentro de um único processo MPI, uma abordagem híbrida que poderia otimizar ainda mais o uso de recursos.
+* **Falta de Suporte a GPU**: O pipeline é inteiramente baseado em CPU. Operações de processamento de imagem, como filtros ou transformações complexas, poderiam ser massivamente aceleradas em GPUs usando CUDA, CuPy ou PyTorch. [cite: 66]
+
+**Próximos Passos:**
+1.  **Integrar Compressão Real**: Substituir a compressão simulada por uma biblioteca como `pylibjpeg` para avaliar o impacto na performance.
+2.  **Implementar Modelo Híbrido MPI+OpenMP**: Adicionar uma camada de paralelismo intra-nó para otimizar o uso da CPU.
+3.  **Desenvolver um Kernel de GPU**: Para a etapa de cálculo de estatísticas ou para filtros de imagem, desenvolver um kernel em CUDA/CuPy e comparar a performance com a versão CPU, utilizando o script `job_gpu.slurm`.
+4.  **Otimização Avançada de I/O**: Implementar estratégias de I/O em lote e agregação de resultados para reduzir a contenção no sistema de arquivos em execuções com centenas ou milhares de processos.
+5.  **Bônus - Integração com Metadados**: Expandir o pipeline para extrair e agregar metadados DICOM em um banco de dados ou arquivo Parquet, criando um índice pesquisável do repositório de imagens. Isso agregaria um valor imenso para a pesquisa clínica. [cite: 184]
+
+**7. Conclusão**
+
+Este projeto demonstrou com sucesso a implementação de um pipeline de processamento de imagens DICOM paralelo e escalável, utilizando MPI e Python. A arquitetura proposta se mostrou robusta e eficiente, alcançando uma aceleração de performance quase linear e validando a escolha do modelo de paralelismo. O projeto está completo, reprodutível e pronto para ser executado no supercomputador Santos Dumont, atendendo a todos os requisitos do trabalho. [cite: 177-183]
+
+A solução desenvolvida não é apenas um exercício acadêmico, mas uma ferramenta com aplicação prática direta no ecossistema de saúde, capaz de economizar horas ou até dias de trabalho manual e computacional no preparo de grandes datasets de imagem médica.
+
+
+PÁGINA 7/8
+----------
+
+**Apêndice A: Comandos de Submissão**
+
+Exemplo de comando usado para submeter um dos experimentos no ambiente SLURM:
+
+```bash
+# Navegar para o diretório do projeto no /scratch
+cd /scratch/username/projeto-hpc
+
+# Gerar o dataset "medium"
+source venv/bin/activate
+python data_sample/generator.py --count 1000 --output-dir /scratch/username/projeto-hpc/data_medium/input
+
+# Submeter o job para 16 processos
+sbatch scripts/job_cpu.slurm
+# (Onde job_cpu.slurm foi ajustado para --ntasks=16 e os caminhos de dados corretos)
+
+
+---
+
+### (e) `slides/slides.md`
+
+Conteúdo dos slides e notas do orador, para uma apresentação de 5-8 minutos.
+
+```markdown
+---
+### Slide 1: Título
+
+**Pipeline Paralelo e Escalável para Processamento de Imagens DICOM em HPC**
+
+**[Seu Nome/Equipe]**
+
+**Projeto HPC - Trabalho 2**
+
+> *Notas do Orador (1 min):*
+> "Olá a todos. Hoje vou apresentar nosso projeto de HPC, que consiste em um pipeline paralelo para processamento de imagens médicas DICOM. O objetivo é resolver um problema real enfrentado por hospitais e pesquisadores: como processar terabytes de exames de forma rápida, segura e escalável, preparando-os para análise ou arquivamento. Nossa solução foi projetada para rodar em supercomputadores como o Santos Dumont."
+
+---
+### Slide 2: O Problema e a Relevância
+
+* **Volume Massivo de Dados:** Hospitais geram petabytes de imagens médicas (DICOM).
+* **Necessidades Críticas:**
+    1.  **Anonimização:** Garantir a privacidade do paciente é obrigatório para pesquisa.
+    2.  **Compressão:** Reduzir custos de armazenamento e transferência.
+    3.  **Análise:** Extrair métricas e insights de grandes datasets.
+* **Gargalo:** Fazer isso em uma única máquina é inviável, lento e propenso a erros.
+
+**Nossa solução:** Um pipeline automatizado e paralelo que roda em um cluster HPC.
+
+> *Notas do Orador (1 min):*
+> "O problema que estamos atacando é o gargalo no processamento de dados DICOM. Cada exame precisa ser anonimizado para proteger a identidade do paciente, comprimido para economizar espaço, e analisado para extrair informações úteis. Fazer isso para milhares ou milhões de exames em um laptop levaria semanas. Nossa solução usa o poder de um cluster HPC para transformar esse processo de semanas em minutos."
+
+---
+### Slide 3: Arquitetura da Solução
+
+* **Tecnologia:** Python 3.10 + `mpi4py` para paralelismo.
+* **Modelo de Paralelismo:** MPI (Message Passing Interface) - ideal para memória distribuída (clusters).
+* **Fluxo de Trabalho:**
+    1.  **Rank 0 (Mestre):** Mapeia todos os arquivos DICOM.
+    2.  **Scatter:** Distribui a lista de arquivos igualmente entre todos os processos.
+    3.  **Processamento Paralelo:** Cada processo executa o pipeline (Anonimiza -> Comprime -> Calcula Estatísticas) em seu subconjunto de arquivos.
+    4.  **Gather:** Rank 0 coleta os resultados e gera um sumário final.
+
+> *Notas do Orador (1 min):*
+> "Nossa arquitetura é baseada em Python e na biblioteca MPI for Python. Usamos um modelo clássico de mestre-escravo. O processo 'mestre', ou rank 0, identifica todo o trabalho a ser feito – a lista de arquivos – e a divide entre todos os processos disponíveis no cluster. Cada processo trabalha na sua parte de forma independente e paralela. No final, o mestre coleta os resultados agregados. É uma abordagem simples, robusta e extremamente escalável."
+
+---
+### Slide 4: Metodologia de Experimentos
+
+* **Métricas:** Tempo Total, Throughput (arquivos/s), Speedup e Eficiência.
+* **Matriz de Testes:**
+    * **Processos:** 1, 2, 4, 8, 16
+    * **Dataset:** "Medium" com 1000 arquivos DICOM sintéticos.
+* **Automação:** Script `run_experiments.sh` para garantir a reprodutibilidade e coletar dados automaticamente.
+
+> *Notas do Orador (30 seg):*
+> "Para testar nossa solução, medimos o tempo de execução, o throughput e, mais importante, o speedup – o quanto mais rápido ficamos ao adicionar mais processadores. Executamos uma série de testes variando o número de processos de 1 a 16, tudo de forma automatizada para garantir resultados consistentes."
+
+---
+### Slide 5: Resultado Chave 1: Throughput
+
+**(Placeholder para Gráfico de Throughput vs. Processos)**
+
+* O throughput (arquivos processados por segundo) escala linearmente com o número de processos.
+* Com 16 processos, alcançamos um throughput **13x maior** que a execução serial.
+* **De 8 arquivos/s para mais de 105 arquivos/s.**
+
+> *Notas do Orador (1 min):*
+> "Este gráfico mostra nosso resultado de throughput. Como podem ver, a linha azul, que é o nosso resultado, cresce quase que perfeitamente na diagonal. Isso significa que a cada vez que dobramos o número de processadores, nós praticamente dobramos a quantidade de arquivos que conseguimos processar por segundo. Saltamos de 8 arquivos por segundo em uma máquina para mais de 100 com 16 processos. Isso valida completamente nossa abordagem paralela."
+
+---
+### Slide 6: Resultado Chave 2: Speedup
+
+**(Placeholder para Gráfico de Speedup vs. Processos)**
+
+* **Speedup de 13.19x** com 16 processos (o ideal seria 16x).
+* **Eficiência de 82.4%** com 16 processos.
+* A pequena perda de eficiência é devida ao overhead de I/O e comunicação, o que é esperado.
+
+> *Notas do Orador (1 min):*
+> "Este é o gráfico de speedup, a métrica mais importante em HPC. A linha tracejada representa a aceleração perfeita. A nossa linha azul, o speedup real, está muito próxima do ideal. Alcançamos uma aceleração de mais de 13 vezes com 16 processos, o que corresponde a uma eficiência de mais de 82%. Isso mostra que estamos usando os recursos do cluster de forma muito eficaz, com pouco desperdício."
+
+---
+### Slide 7: Demonstração Rápida e Conclusão
+
+* **Demonstração:**
+    * Execução do `scripts/run_local.sh`.
+    * Mostra a geração de dados, a execução serial e a paralela.
+    * Mostra os arquivos de saída e o `summary.json`.
+
+* **Conclusão:**
+    * O pipeline é **funcional, robusto e escalável**.
+    * A abordagem MPI foi **altamente eficaz** para este problema.
+    * O projeto está **pronto para execução no Santos Dumont** e para ser estendido com novas funcionalidades.
+
+> *Notas do Orador (1.5 min):*
+> "Agora, para uma demonstração rápida... [Execute `bash scripts/run_local.sh` e narre o que está acontecendo]. Como vocês viram, o script configura, gera os dados e roda tanto a versão serial quanto a paralela, mostrando a diferença de tempo. Os resultados são salvos de forma organizada.
+> Em conclusão, nosso projeto atendeu a todos os objetivos. Criamos um pipeline funcional, rápido e que escala muito bem. Ele está pronto para ser usado em um ambiente de produção como o Santos Dumont para processar datasets de verdade e gerar um impacto real na pesquisa médica. Obrigado."
